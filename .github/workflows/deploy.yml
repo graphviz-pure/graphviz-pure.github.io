@@ -1,0 +1,67 @@
+name: Deploy
+
+# Publishes https://graphviz-pure.github.io/. The site is built by graphviz-pure/graphviz-pure's
+# Cross-platform workflow (job "Build the documentation site") and uploaded there as the `site`
+# artifact; this workflow takes the artifact of the latest successful run on master and deploys
+# it with GitHub Pages. graphviz-pure/graphviz-pure holds no credential for this repository, and
+# this one only reads that public repository's artifacts.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    name: Fetch the latest site build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # read the source repository's workflow runs and artifacts
+    outputs:
+      deploy: ${{ steps.find.outputs.deploy }}
+    steps:
+      - name: Find the latest successful build on master
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SRC: graphviz-pure/graphviz-pure
+          EVENT: ${{ github.event_name }}
+        run: |
+          read -r run sha < <(gh run list -R "$SRC" --workflow cross-platform.yml --branch master \
+            --event push --status success --limit 1 --json databaseId,headSha --jq '.[0] | "\(.databaseId) \(.headSha)"')
+          live=$(curl -fsS https://graphviz-pure.github.io/build.txt || true)
+          echo "latest $sha (run $run), live ${live:-none}"
+          if [ "$sha" = "$live" ] && [ "$EVENT" = schedule ]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          gh run download "$run" -R "$SRC" -n site -D dist
+          test -f dist/index.html
+          echo "$sha" > dist/build.txt
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+      - if: steps.find.outputs.deploy == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: fetch
+    if: needs.fetch.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write # publish the Pages artifact
+      id-token: write # deploy-pages authenticates with an OIDC token
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
