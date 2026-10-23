@@ -2,9 +2,10 @@ name: Deploy
 
 # Publishes https://graphviz-pure.github.io/. The site is built by graphviz-pure/graphviz-pure's
 # Cross-platform workflow (job "Build the documentation site") and uploaded there as the `site`
-# artifact; this workflow takes the artifact of the latest successful run on master and deploys
-# it with GitHub Pages. graphviz-pure/graphviz-pure holds no credential for this repository, and
-# this one only reads that public repository's artifacts.
+# artifact; this workflow takes the artifact of the newest successful run on master that has one
+# and deploys it with GitHub Pages. That workflow skips the build when nothing the site shows
+# changed, so the latest run may have no artifact. graphviz-pure/graphviz-pure holds no
+# credential for this repository, and this one only reads that public repository's artifacts.
 
 on:
   schedule:
@@ -37,8 +38,18 @@ jobs:
           SRC: graphviz-pure/graphviz-pure
           EVENT: ${{ github.event_name }}
         run: |
-          read -r run sha < <(gh run list -R "$SRC" --workflow cross-platform.yml --branch master \
-            --event push --status success --limit 1 --json databaseId,headSha --jq '.[0] | "\(.databaseId) \(.headSha)"')
+          gh run list -R "$SRC" --workflow cross-platform.yml --branch master --event push \
+            --status success --limit 200 --json databaseId --jq '.[].databaseId' > "$RUNNER_TEMP/passed"
+          gh api --paginate "repos/$SRC/actions/artifacts?name=site&per_page=100" --jq '.artifacts[]
+            | select((.expired | not) and .workflow_run.head_branch == "master")
+            | "\(.created_at) \(.workflow_run.id) \(.workflow_run.head_sha)"' > "$RUNNER_TEMP/built"
+          read -r _ run sha < <(sort -r "$RUNNER_TEMP/built" | while read -r at id head; do
+            if grep -qx "$id" "$RUNNER_TEMP/passed"; then echo "$at $id $head"; break; fi
+          done) || true
+          if [ -z "${run:-}" ]; then
+            echo "No successful master run has an unexpired site artifact; the live site stays."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           live=$(curl -fsS https://graphviz-pure.github.io/build.txt || true)
           echo "latest $sha (run $run), live ${live:-none}"
           if [ "$sha" = "$live" ] && [ "$EVENT" = schedule ]; then
